@@ -2,6 +2,8 @@
 
 Tools exposed:
 - list_decks
+- create_deck   (NEW)
+- delete_deck   (NEW)
 - add_card (Basic / Cloze via fastanki)
 - find_notes (search by deck / tag / field)
 - get_note (read one)
@@ -11,6 +13,11 @@ Tools exposed:
 
 Transport: streamable-http, port from ANKI_MCP_PORT (default 8765).
 Auth: Bearer ANKI_MCP_TOKEN (set via Infisical).
+
+Collection location: fastanki uses $FASTANKI_DIR/collection.anki2 (default ~/.fastanki).
+In the anki-sync stack, FASTANKI_DIR=/sync/matthias so the MCP operates on the same
+SQLite DB the Anki Desktop client syncs. The anki-sync container MUST be stopped
+while MCP writes (exclusive lock).
 """
 
 from __future__ import annotations
@@ -34,8 +41,30 @@ def list_decks() -> list[str]:
     """Return all deck names in the collection (sorted)."""
     from fastanki.collection import Collection  # type: ignore
     with Collection.open() as col:
-        # fastanki: col.decks() is a method that returns the list directly
         return sorted(col.decks())
+
+
+@mcp.tool()
+def create_deck(name: str) -> dict:
+    """Create a deck (and any missing parent decks) by name. Use "::" for nesting.
+
+    Returns {"name": ..., "id": <deck_id>}. If the deck already exists, returns
+    its id without re-creating.
+    """
+    from fastanki.collection import Collection  # type: ignore
+    with Collection.open() as col:
+        did = col.deck_id(name, create=True)
+    return {"name": name, "id": did}
+
+
+@mcp.tool()
+def delete_deck(name: str) -> dict:
+    """Delete a deck and all its subdecks (with their cards/notes). Idempotent."""
+    from fastanki.collection import Collection  # type: ignore
+    with Collection.open() as col:
+        removed = col.remove_deck(name)
+    return {"name": name, "removed": removed}
+
 
 @mcp.tool()
 def add_card(
@@ -45,6 +74,7 @@ def add_card(
     tags: str | None = None,
 ) -> int:
     """Create a card. Returns the new note id.
+
     Args:
         deck: deck name (created if missing). Use "::" for nesting.
         fields: {field_name: value}, e.g. {"Front": "q", "Back": "a"}.
@@ -53,10 +83,12 @@ def add_card(
     """
     return fk.add_card(model=model, deck=deck, tags=tags, fields=fields)
 
+
 @mcp.tool()
 def add_cloze(text: str, deck: str = "Default", back_extra: str = "", tags: str | None = None) -> int:
     """Add a Cloze card. `text` uses {{c1::hidden}} syntax."""
     return fk.add_cloze_card(text=text, back_extra=back_extra, deck=deck, tags=tags)
+
 
 @mcp.tool()
 def find_notes(
@@ -75,11 +107,13 @@ def find_notes(
         for n in notes
     ]
 
+
 @mcp.tool()
 def get_note(note_id: int) -> dict:
     """Read a single note by id. Note has no deck attribute (Anki 25)."""
     n = fk.get_note(note_id)
     return {"id": n.id, "tags": list(n.tags), "fields": dict(n.fields.items())}
+
 
 @mcp.tool()
 def update_note(
@@ -92,16 +126,19 @@ def update_note(
     fk.update_note(note_id, tags=tags, add_tags=add_tags, **(fields or {}))
     return {"ok": True, "id": note_id}
 
+
 @mcp.tool()
 def delete_note(note_id: int) -> dict:
     """Delete a note (and all its cards) by id."""
     fk.del_note(note_id)
     return {"ok": True, "id": note_id}
 
+
 @mcp.tool()
 def add_media(path: str, fname: str | None = None) -> str:
     """Copy a local file into the collection's media folder. Returns the stored filename."""
     return fk.add_media(path=path, fname=fname)
+
 
 # ---------------------------------------------------------------------------
 # Entry

@@ -99,6 +99,9 @@ celerybeat-schedule
 
 # dotenv
 .env
+.anki-mcp-token
+tools-list.json
+__pycache__/
 
 # virtualenv
 .venv

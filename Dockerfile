@@ -26,5 +26,5 @@ EXPOSE 8765
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -s --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp | grep -qE '^(2|4)[0-9]{2}$' || exit 1
 
-# Token is supplied via Arcane envContent; if not set, server runs in anonymous mode (token=None → disabled)
+# ANKI_MCP_TOKEN is supplied via environment (docker-compose env file or k8s secret). If not set, server runs in anonymous mode (token=None → disabled).
 CMD ["python", "-m", "server"]
