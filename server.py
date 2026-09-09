@@ -31,10 +31,11 @@ mcp = FastMCP(name="anki-mcp")
 
 @mcp.tool()
 def list_decks() -> list[str]:
-    """Return all deck names in the collection."""
+    """Return all deck names in the collection (sorted)."""
     from fastanki.collection import Collection  # type: ignore
     with Collection.open() as col:
-        return sorted(col.decks.all_names())
+        # fastanki: col.decks() is a method that returns the list directly
+        return sorted(col.decks())
 
 @mcp.tool()
 def add_card(
@@ -63,18 +64,22 @@ def find_notes(
     tag: str | None = None,
     fields: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Find notes by deck / tag / field-substring. Returns [{id, deck, tags, fields}]."""
+    """Find notes by deck / tag / field-substring. Returns [{id, tags, fields}].
+
+    `deck` is forwarded to fastanki for filtering, but is NOT returned per-note
+    (Anki 25's Note model has no .deck attribute — deck lives on the card).
+    """
     notes = fk.find_notes(deck=deck, tag=tag, fields=fields)
     return [
-        {"id": n.id, "deck": n.deck, "tags": list(n.tags), "fields": dict(n.fields.items())}
+        {"id": n.id, "tags": list(n.tags), "fields": dict(n.fields.items())}
         for n in notes
     ]
 
 @mcp.tool()
 def get_note(note_id: int) -> dict:
-    """Read a single note by id."""
+    """Read a single note by id. Note has no deck attribute (Anki 25)."""
     n = fk.get_note(note_id)
-    return {"id": n.id, "deck": n.deck, "tags": list(n.tags), "fields": dict(n.fields.items())}
+    return {"id": n.id, "tags": list(n.tags), "fields": dict(n.fields.items())}
 
 @mcp.tool()
 def update_note(
