@@ -1,25 +1,68 @@
-name: anki-mcp
+# anki-mcp stack (2-service variant — anki-sync-api nutzt embedded DB)
+# Start: docker compose up -d
+#
+# Topology:
+#   anki-mcp  (port 8765)  <-- Cloudflare Tunnel --> https://anki-mcp.sa-ma.online
+#       |
+#       v  http://anki-sync-api:8765 (internes Netz, kein TLS)
+#   anki-sync-api  (port 8765, intern)
+#       -> embedded DB (SQLite/mariadb) im Volume
+
 services:
+  anki-sync-api:
+    # Euer geforkter Sync-Server. Image-Name muss gebaut/gepullt sein.
+    image: ${ANKI_SYNC_IMAGE:-ghcr.io/icem0/anki-sync-api:latest}
+    restart: unless-stopped
+    environment:
+      ANKI_SYNC_API_TOKEN: ${ANKI_SYNC_API_TOKEN}
+      ANKI_LISTEN_HOST: 0.0.0.0
+      ANKI_LISTEN_PORT: "8765"
+      # Falls embedded DB: Pfad im Volume
+      ANKI_DB_PATH: /data/anki.sqlite
+    volumes:
+      - anki-sync-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8765/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - anki-internal
+
   anki-mcp:
     build: .
     image: anki-mcp:local
-    container_name: anki-mcp
     restart: unless-stopped
-    working_dir: /app
+    depends_on:
+      anki-sync-api:
+        condition: service_healthy
     environment:
-      - ANKI_COLLECTION_PATH=/data/collection.anki2
-      - ANKI_MEDIA_FOLDER=/data/media
-      - ANKI_MCP_HOST=0.0.0.0
-      - ANKI_MCP_PORT=8765
-      - ANKI_MCP_TOKEN=__SET_VIA_INFISICAL__
-      - ANKI_SYNC_URL=
-      - ANKI_SYNC_USER=
-      - ANKI_SYNC_PW=
+      ANKI_MCP_PORT: "8765"
+      ANKI_MCP_HOST: 0.0.0.0
+      ANKI_MCP_TOKEN: ${ANKI_MCP_TOKEN}
+      ANKI_BACKEND_URL: http://anki-sync-api:8765
+      ANKI_BACKEND_TOKEN: ${ANKI_SYNC_API_TOKEN}
     ports:
       - "8765:8765"
-    volumes:
-      - anki-mcp-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8765/mcp"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - anki-internal
+      - anki-external
 
 volumes:
-  anki-mcp-data:
-    name: anki-mcp-data
+  anki-sync-data:
+    name: anki-sync-data
+
+networks:
+  anki-internal:
+    name: anki-internal
+    internal: true
+  anki-external:
+    name: anki-external
+    driver: bridge

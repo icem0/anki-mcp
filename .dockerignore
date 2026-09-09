@@ -1,0 +1,9 @@
+# Build-Artefakte ausschließen
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.git
+**/.gitignore
+**/.venv
+**/node_modules
+*.md.bak

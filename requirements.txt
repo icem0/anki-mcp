@@ -1,6 +1,12 @@
 fastapi>=0.115
 uvicorn[standard]>=0.32
-fastanki>=0.1
 fastmcp>=2.0
 pydantic>=2.0
 requests>=2.31
+# fastanki is vendored under src/fastanki/ (added to sys.path at server startup)
+# but it has runtime dependencies — pin them here so the image is self-contained
+fastcore>=1.5       # fastanki uses fastcore.utils.*
+protobuf>=4.0       # google.protobuf.* for anki schema .proto descriptors
+httpx>=0.27         # fastanki.syncer uses httpx for AnkiWeb requests
+zstandard>=0.23      # fastanki uses zstandard for collection compression
+apsw>=3.46          # Anki's SQLite binding (vendored fastanki uses apsw, not stdlib sqlite3)
