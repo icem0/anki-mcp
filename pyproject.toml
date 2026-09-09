@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastanki"
+dynamic = ["version"]
+description = "Python tools for Anki"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [{name = "Jeremy Howard", email = "github@jhoward.fastmail.fm"}]
+keywords = ['nbdev', 'jupyter', 'notebook', 'python']
+classifiers = ["Natural Language :: English", "Intended Audience :: Developers", "Development Status :: 3 - Alpha", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3 :: Only"]
+dependencies = ['fastcore', 'httpx', 'zstandard', 'protobuf>=6.31', 'apsw']
+
+[project.optional-dependencies]
+dev = ['anki', 'pytest', 'pytest-timeout', 'fastcore>=2.1.18']
+
+
+[project.urls]
+Repository = "https://github.com/AnswerDotAI/fastanki"
+Documentation = "https://AnswerDotAI.github.io/fastanki"
+
+[project.entry-points.nbdev]
+fastanki = "fastanki._modidx:d"
+
+[project.entry-points.pyskills]
+fastanki = "fastanki.skill"
+
+[tool.setuptools.dynamic]
+version = {attr = "fastanki.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["fastanki*"]
+
+[tool.setuptools.package-data]
+"fastanki._proto" = ["*.binpb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.nbdev]
+allowed_metadata_keys = ['solveit']
+allowed_cell_metadata_keys = ['solveit_ai']
+
+[tool.chkstyle]
+skip_paths = ["_modidx.py"]

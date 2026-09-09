@@ -1,0 +1,50 @@
+version: "3.9"
+# anki-mcp — headless Anki REST+MCP server.
+# Mounts OWN collection.anki2 (does NOT touch the anki-sync volume).
+# Sync to/from https://anki-sync.sa-ma.online is opt-in via SYNC_URL.
+
+services:
+  anki-mcp:
+    image: python:3.12-slim
+    container_name: anki-mcp
+    restart: unless-stopped
+    working_dir: /app
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        apt-get update -qq && apt-get install -y --no-install-recommends git >/dev/null
+        pip install --no-cache-dir --upgrade pip >/dev/null
+        pip install --no-cache-dir fastapi 'uvicorn[standard]' fastanki fastmcp pydantic requests >/dev/null
+        echo "[anki-mcp] starting FastMCP streamable-http on :$$ANKI_MCP_PORT"
+        exec python -m server
+    volumes:
+      - ./server.py:/app/server.py:ro
+      - ./src:/app/src:ro
+      - anki-mcp-data:/data
+    environment:
+      # Collection location inside the container
+      - ANKI_COLLECTION_PATH=/data/collection.anki2
+      - ANKI_MEDIA_FOLDER=/data/media
+      # MCP transport
+      - ANKI_MCP_HOST=0.0.0.0
+      - ANKI_MCP_PORT=8765
+      # Optional: bearer token for HTTP transport (clients must send "Authorization: Bearer $TOKEN")
+      - ANKI_MCP_TOKEN=__SET_VIA_INFISICAL__
+      # Optional: sync against running anki-sync server (requires ANKI_SYNC_USER / ANKI_SYNC_PW in Infisical)
+      - ANKI_SYNC_URL=
+      - ANKI_SYNC_USER=
+      - ANKI_SYNC_PW=
+    ports:
+      - "8765:8765"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import socket,os,sys;s=socket.socket();s.settimeout(3);s.connect(('127.0.0.1',int(os.environ.get('ANKI_MCP_PORT','8765'))));s.close()\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  anki-mcp-data:
+    name: anki-mcp-data
