@@ -28,9 +28,29 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from fastmcp import FastMCP        # type: ignore
+from fastmcp.server.auth.providers.jwt import StaticTokenVerifier  # type: ignore
 from fastanki import core as fk    # type: ignore
 
-mcp = FastMCP(name="anki-mcp")
+# Auth: ANKI_MCP_TOKEN from env (set via compose env_file / Infisical).
+# If the var is missing, refuse to start — no anonymous access.
+_token = os.environ.get("ANKI_MCP_TOKEN", "").strip()
+if not _token:
+    sys.stderr.write(
+        "FATAL: ANKI_MCP_TOKEN is not set. Refusing to start without auth.\n"
+    )
+    sys.exit(1)
+
+_auth = StaticTokenVerifier(
+    tokens={
+        _token: {
+            "client_id": "anki-mcp-operator",
+            "scopes": ["mcp:tools"],
+        }
+    },
+    required_scopes=["mcp:tools"],
+)
+
+mcp = FastMCP(name="anki-mcp", auth=_auth)
 
 # ---------------------------------------------------------------------------
 # MCP tools
