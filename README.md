@@ -20,14 +20,23 @@ cd anki-mcp
 
 # 1. Configure secrets
 cp .env.example .env
-$EDITOR .env   # set SYNC_USER1 and ANKI_MCP_TOKEN
+$EDITOR .env   # set SYNC_USER1 and the INFISICAL_* variables
+# Then put ANKI_MCP_TOKEN in your secret manager at
+# ${INFISICAL_PROJECT_ID} / ${INFISICAL_ENV} / ${INFISICAL_SECRET_PATH}
 
 # 2. Build and start
 docker compose up -d --build
 
-# 3. Verify the MCP endpoint responds
+# 3. Verify the MCP endpoint responds (unauthenticated request returns 401;
+#    this is expected — only requests with the correct Bearer token succeed)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8765/mcp
+# → 401
+
+# 4. With the token (pulled live from the secret manager, never from a local file):
+TOKEN=$(infisical run --projectId "$INFISICAL_PROJECT_ID" --env "$INFISICAL_ENV" \
+         --path "$INFISICAL_SECRET_PATH" -- sh -c 'echo "$ANKI_MCP_TOKEN"')
 curl -s -X POST http://localhost:8765/mcp \
-  -H "Authorization: Bearer $(grep ^ANKI_MCP_TOKEN .env | cut -d= -f2)" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'

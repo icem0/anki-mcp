@@ -13,6 +13,7 @@ services:
       SYNC_BASE: "/sync"
       SYNC_HOST: "0.0.0.0"
       SYNC_PORT: "8080"
+      SYNC_BASE_URL: "https://anki-sync.sa-ma.online"
     volumes:
       - anki-sync:/sync
     restart: unless-stopped
@@ -31,23 +32,37 @@ services:
     image: anki-mcp:local
     ports:
       - "8765:8765"
+    # ANKI_MCP_TOKEN is NOT set here. It is fetched at container start by the
+    # entrypoint (./mcp/entrypoint.sh) from the secret manager referenced via
+    # the INFISICAL_* variables below. Only the credentials needed to reach
+    # the secret manager live in .env.
+    env_file:
+      - .env
     environment:
-      ANKI_MCP_TOKEN: ${ANKI_MCP_TOKEN}
       ANKI_MCP_PORT: "8765"
       ANKI_MCP_HOST: "0.0.0.0"
-      # Point fastanki at the same collection the sync server exposes.
-      # Both services share the anki-sync volume; see docs/architecture.md.
+      INFISICAL_PROJECT_ID: "${INFISICAL_PROJECT_ID:?INFISICAL_PROJECT_ID must be set}"
+      INFISICAL_ENV: "${INFISICAL_ENV:-prod}"
+      INFISICAL_SECRET_PATH: "${INFISICAL_SECRET_PATH:-/anki-mcp}"
+      INFISICAL_SITE_URL: "${INFISICAL_SITE_URL:-https://infisical.sa-ma.online}"
+      # Point fastanki at matthias' collection, shared with anki-sync volume.
+      # anki-sync MUST be stopped while mcp writes, then restarted.
       FASTANKI_DIR: "/sync/${SYNC_USER1}"
     volumes:
       - anki-mcp-data:/data
+      # mount matthias' collection (read-write). Lock conflicts with anki-sync;
+      # we stop anki-sync before mcp writes via Arcane redeploy orchestration.
       - anki-sync:/sync:rw
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "python -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\",8765)); s.close()'"]
+      # Auth is enforced: an unauthenticated request returns 401, which is
+      # also a valid "server is up" signal. Any 1xx-4xx means the port is
+      # listening; only 5xx / connect-refused fails the check.
+      test: ["CMD-SHELL", "code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp); case $code in 1*|2*|3*|4*) exit 0;; *) exit 1;; esac"]
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
 volumes:
   anki-sync:
