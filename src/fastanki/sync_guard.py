@@ -24,8 +24,16 @@ This module gives the MCP container a memory and a safety net:
 * ``create_backup()`` — copy ``collection.anki2`` to a timestamped
   sibling under ``backups/``.
 * ``pre_write_check()`` — combined gate: backup, then check for drift.
-  Raises ``SyncStateDrift`` if the collection's ``scm`` changed since we
-  last wrote, OR if a branch copy appeared under ``/sync/`` since then.
+  Raises ``SyncStateDrift`` if **any** of the following moved since we
+  last wrote: ``col.usn`` (Anki's write sequence number), ``col.mod``
+  (ms-precision mod-time), ``note_count``, ``card_count``, ``max_note_id``
+  — OR if a new branch copy appeared under ``/sync/<user>#*/``.
+
+  Note: ``col.scm`` is **not** used as a drift indicator. ``scm`` is
+  Anki's schema-migration marker; it only moves on schema upgrades, so
+  it would miss every normal card review / note add. The Anki sync
+  protocol itself uses ``usn`` for divergence detection, so we follow
+  the same convention.
 
 The state file is ``<db-stem>.sync-state.json`` next to the DB. Format::
 
@@ -95,7 +103,7 @@ def _backup_dir() -> Path:
 
 
 def _read_state_from_db() -> dict[str, Any]:
-    """Read col.scm, col.usn, col.mod, mtime, and table counts from the DB."""
+    """Read col.scm, col.usn, col.mod, mtime, table counts, and max note id."""
     db = _db_path()
     if not db.exists():
         raise SyncGuardError(f"Collection DB not found: {db}")
@@ -108,6 +116,7 @@ def _read_state_from_db() -> dict[str, Any]:
         notes = con.execute("select count(*) from notes").fetchone()[0]
         cards = con.execute("select count(*) from cards").fetchone()[0]
         revlog = con.execute("select count(*) from revlog").fetchone()[0]
+        max_note_id = con.execute("select max(id) from notes").fetchone()[0] or 0
         try:
             mtime = db.stat().st_mtime
         except OSError:
@@ -120,6 +129,7 @@ def _read_state_from_db() -> dict[str, Any]:
             "card_count": int(cards),
             "note_count": int(notes),
             "revlog_count": int(revlog),
+            "max_note_id": int(max_note_id),
             "db_bytes": db.stat().st_size,
         }
     finally:
@@ -235,15 +245,37 @@ def check_sync_state() -> dict[str, Any]:
     branches = list_branch_copies()
     drift: dict[str, Any] = {}
     if remembered:
-        if remembered.get("scm") != current["scm"]:
-            drift["scm"] = {
-                "remembered": remembered.get("scm"),
-                "current": current["scm"],
+        # ``usn`` is Anki's write-sequence number. Every Anki write
+        # (card review, note add, config change, deck rename) bumps it.
+        # This is the same indicator Anki's own sync protocol uses for
+        # divergence detection.
+        if remembered.get("usn") != current["usn"]:
+            drift["usn"] = {
+                "remembered": remembered.get("usn"),
+                "current": current["usn"],
             }
+        # ``mod_ms`` is the ms-precision modification timestamp on
+        # ``col.mod``. Bumped on every write. Useful as a redundant
+        # signal in case ``usn`` was not updated by some other writer.
         if remembered.get("mod_ms") != current["mod_ms"]:
             drift["mod_ms"] = {
                 "remembered": remembered.get("mod_ms"),
                 "current": current["mod_ms"],
+            }
+        # Row counts: another writer added/removed notes or cards since
+        # we last looked.
+        for key in ("note_count", "card_count"):
+            if remembered.get(key) != current[key]:
+                drift[key] = {
+                    "remembered": remembered.get(key),
+                    "current": current[key],
+                }
+        # Max note id: monotonic, advances on every note insert. Catches
+        # inserts even if the writer used a different schema (defensive).
+        if remembered.get("max_note_id") != current["max_note_id"]:
+            drift["max_note_id"] = {
+                "remembered": remembered.get("max_note_id"),
+                "current": current["max_note_id"],
             }
     return {
         "current": current,
@@ -260,8 +292,9 @@ def pre_write_check(skip_backup: bool = False, reason: str = "") -> dict[str, An
 
     Steps:
         1. (optional) Back up the live collection to ``backups/``.
-        2. Compare current ``scm`` to the remembered one. Raise
-           ``SyncStateDrift`` if it moved.
+        2. Compare current state to remembered on multiple signals
+           (``usn``, ``mod_ms``, ``note_count``, ``card_count``,
+           ``max_note_id``). Raise ``SyncStateDrift`` if any moved.
         3. Compare current branch list to the remembered one. Raise
            ``SyncStateDrift`` if new branches appeared.
         4. Re-snapshot the state.
@@ -274,12 +307,28 @@ def pre_write_check(skip_backup: bool = False, reason: str = "") -> dict[str, An
     current = _read_state_from_db()
     remembered = _load_remembered_state()
     if remembered:
-        if remembered.get("scm") != current["scm"]:
+        # Multi-signal drift check. Any single signal moving since we
+        # last wrote indicates another writer (desktop, anki-sync, or
+        # a stray manual DB edit) touched the collection. We do NOT
+        # use ``col.scm`` here — it's Anki's schema-migration marker
+        # and only changes on schema upgrades, not on regular writes,
+        # so it would miss every card review / note add.
+        signals = ("usn", "mod_ms", "note_count", "card_count", "max_note_id")
+        moved: list[str] = []
+        details: dict[str, Any] = {}
+        for key in signals:
+            if remembered.get(key) != current[key]:
+                moved.append(key)
+                details[key] = {
+                    "remembered": remembered.get(key),
+                    "current": current[key],
+                }
+        if moved:
             raise SyncStateDrift(
-                f"col.scm drift: remembered={remembered.get('scm')} "
-                f"current={current['scm']}. The desktop or anki-sync "
-                f"container has written to the collection between MCP "
-                f"calls. Run check_sync_state to inspect, then re-run."
+                f"Collection drift on signals {moved}: {details}. "
+                f"The desktop or anki-sync container has written to "
+                f"the collection between MCP calls. Run "
+                f"check_sync_state to inspect, then re-run."
             )
     branches_before = (
         set(b["path"] for b in (remembered or {}).get("branches", []))
