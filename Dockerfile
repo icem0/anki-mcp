@@ -41,8 +41,7 @@ EXPOSE 8765
 # Healthcheck: 401 (unauthenticated) is also a valid "server is up" signal,
 # since the server deliberately rejects anonymous traffic. Anything 2xx/3xx/4xx
 # means the port is listening; only connect-refused / 5xx fails the check.
-HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
-    CMD curl -s --max-time 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp | grep -qE '^[1-4][0-9]{2}$' || exit 1
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 CMD curl -s --max-time 2 http://127.0.0.1:8765/mcp -o /dev/null -w '%{http_code}' | grep -qE '^[1-4][0-9]{2}$' || exit 1
 
 # Entrypoint: secrets are fetched at runtime from the configured secret manager
 # (Infisical) before the MCP server starts. The container requires

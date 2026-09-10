@@ -58,7 +58,11 @@ services:
       # Auth is enforced: an unauthenticated request returns 401, which is
       # also a valid "server is up" signal. Any 1xx-4xx means the port is
       # listening; only 5xx / connect-refused fails the check.
-      test: ["CMD-SHELL", "code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp); case $code in 1*|2*|3*|4*) exit 0;; *) exit 1;; esac"]
+      # Note: `$$` in compose escapes to literal `$` for the runtime shell,
+      # so the healthcheck receives a syntactically valid `case $code in ...`.
+      test:
+        - "CMD-SHELL"
+        - "code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp); case $$code in 1*|2*|3*|4*) exit 0;; *) exit 1;; esac"
       interval: 10s
       timeout: 3s
       retries: 3
