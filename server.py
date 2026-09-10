@@ -12,7 +12,7 @@ Tools exposed:
 - add_media
 
 Transport: streamable-http, port from ANKI_MCP_PORT (default 8765).
-Auth: Bearer ANKI_MCP_TOKEN (set via compose env_file `.env`).
+Auth: Bearer ANKI_MCP_TOKEN (set via Infisical).
 
 Collection location: fastanki uses $FASTANKI_DIR/collection.anki2 (default ~/.fastanki).
 In the anki-sync stack, FASTANKI_DIR=/sync/matthias so the MCP operates on the same
@@ -31,7 +31,7 @@ from fastmcp import FastMCP        # type: ignore
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier  # type: ignore
 from fastanki import core as fk    # type: ignore
 
-# Auth: ANKI_MCP_TOKEN from env (set via compose env_file `.env`).
+# Auth: ANKI_MCP_TOKEN from env (set via compose env_file / Infisical).
 # If the var is missing, refuse to start — no anonymous access.
 _token = os.environ.get("ANKI_MCP_TOKEN", "").strip()
 if not _token:
@@ -65,24 +65,119 @@ def list_decks() -> list[str]:
 
 
 @mcp.tool()
-def create_deck(name: str) -> dict:
+def check_sync_state() -> dict:
+    """Inspect the live collection's sync state vs. the last MCP write.
+
+    Returns:
+        {
+            "current":     {scm, usn, mod_ms, mtime_iso, card_count, note_count, revlog_count, db_bytes},
+            "remembered":  same shape, or None if we never wrote,
+            "drift":       diff between current and remembered (scm/mod_ms moved?),
+            "branches":    list of /sync/<user>#<hash>/collection.anki2 paths,
+            "branch_count": int,
+            "db_path":     absolute path
+        }
+
+    Use this to detect that the desktop or anki-sync container has
+    written in between MCP calls (drift.scm or drift.mod_ms is set), or
+    that a sync conflict was logged (branches is non-empty).
+    """
+    from fastanki.sync_guard import check_sync_state as _check  # type: ignore
+    return _check()
+
+
+@mcp.tool()
+def create_backup(reason: str = "") -> dict:
+    """Copy the live collection.anki2 to backups/collection-<utc-iso>.anki2.
+
+    Returns {"path": "...", "bytes": int, "reason": "..."}.
+    """
+    from fastanki.sync_guard import create_backup as _bk  # type: ignore
+    p = _bk(reason=reason)
+    return {"path": str(p), "bytes": p.stat().st_size, "reason": reason}
+
+
+def _safe_write(skip_backup: bool, reason: str, fn, *args, **kwargs):
+    """Run a fastanki write under the sync-guard.
+
+    - Backups the live DB first (unless skip_backup=True).
+    - Refuses if the DB's scm drifted from our last snapshot, or if a
+      new /sync/<user>#*/ branch appeared.
+    - Re-snapshots the state after the write succeeds.
+    """
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+
+    try:
+        pre_write_check(skip_backup=skip_backup, reason=reason)
+    except SyncStateDrift as e:
+        # re-raise with a hint — MCP clients will see the JSON-formatted message
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
+    result = fn(*args, **kwargs)
+    remember_sync_state()
+    return result
+
+
+@mcp.tool()
+def create_deck(name: str, skip_backup: bool = False) -> dict:
     """Create a deck (and any missing parent decks) by name. Use "::" for nesting.
 
     Returns {"name": ..., "id": <deck_id>}. If the deck already exists, returns
     its id without re-creating.
+
+    Refuses to write if the collection drifted since the last MCP call
+    (run `check_sync_state` first) unless `skip_backup=True` is passed.
     """
     from fastanki.collection import Collection  # type: ignore
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+
+    try:
+        pre_write_check(skip_backup=skip_backup, reason="create_deck")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
     with Collection.open() as col:
         did = col.deck_id(name, create=True)
+    remember_sync_state()
     return {"name": name, "id": did}
 
 
 @mcp.tool()
-def delete_deck(name: str) -> dict:
-    """Delete a deck and all its subdecks (with their cards/notes). Idempotent."""
+def delete_deck(name: str, skip_backup: bool = False) -> dict:
+    """Delete a deck and all its subdecks (with their cards/notes). Idempotent.
+
+    Refuses to write if the collection drifted since the last MCP call
+    (run `check_sync_state` first) unless `skip_backup=True` is passed.
+    """
     from fastanki.collection import Collection  # type: ignore
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+
+    try:
+        pre_write_check(skip_backup=skip_backup, reason=f"delete_deck:{name}")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
     with Collection.open() as col:
         removed = col.remove_deck(name)
+    remember_sync_state()
     return {"name": name, "removed": removed}
 
 
@@ -92,6 +187,7 @@ def add_card(
     fields: dict[str, str],
     model: str = "Basic",
     tags: str | None = None,
+    skip_backup: bool = False,
 ) -> int:
     """Create a card. Returns the new note id.
 
@@ -100,14 +196,57 @@ def add_card(
         fields: {field_name: value}, e.g. {"Front": "q", "Back": "a"}.
         model: notetype name (default "Basic", also "Cloze").
         tags: space-separated tags, optional.
+        skip_backup: set to True to skip the pre-write backup (NOT
+            recommended; the backup lets you recover from a wrong sync
+            choice on the desktop).
+
+    Refuses to write if the collection drifted since the last MCP call
+    (run `check_sync_state` first) unless `skip_backup=True` is passed.
     """
-    return fk.add_card(model=model, deck=deck, tags=tags, fields=fields)
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+    try:
+        pre_write_check(skip_backup=skip_backup, reason=f"add_card:{deck}")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
+    nid = fk.add_card(model=model, deck=deck, tags=tags, fields=fields)
+    remember_sync_state()
+    return nid
 
 
 @mcp.tool()
-def add_cloze(text: str, deck: str = "Default", back_extra: str = "", tags: str | None = None) -> int:
-    """Add a Cloze card. `text` uses {{c1::hidden}} syntax."""
-    return fk.add_cloze_card(text=text, back_extra=back_extra, deck=deck, tags=tags)
+def add_cloze(
+    text: str,
+    deck: str = "Default",
+    back_extra: str = "",
+    tags: str | None = None,
+    skip_backup: bool = False,
+) -> int:
+    """Add a Cloze card. `text` uses {{c1::hidden}} syntax.
+
+    Refuses to write if the collection drifted since the last MCP call.
+    """
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+    try:
+        pre_write_check(skip_backup=skip_backup, reason=f"add_cloze:{deck}")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
+    nid = fk.add_cloze_card(text=text, back_extra=back_extra, deck=deck, tags=tags)
+    remember_sync_state()
+    return nid
 
 
 @mcp.tool()
@@ -141,23 +280,73 @@ def update_note(
     fields: dict[str, str] | None = None,
     tags: str | None = None,
     add_tags: str | None = None,
+    skip_backup: bool = False,
 ) -> dict:
-    """Update a note's fields and/or tags. `tags` REPLACES, `add_tags` APPENDS."""
+    """Update a note's fields and/or tags. `tags` REPLACES, `add_tags` APPENDS.
+
+    Refuses to write if the collection drifted since the last MCP call.
+    """
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+    try:
+        pre_write_check(skip_backup=skip_backup, reason=f"update_note:{note_id}")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
     fk.update_note(note_id, tags=tags, add_tags=add_tags, **(fields or {}))
+    remember_sync_state()
     return {"ok": True, "id": note_id}
 
 
 @mcp.tool()
-def delete_note(note_id: int) -> dict:
-    """Delete a note (and all its cards) by id."""
+def delete_note(note_id: int, skip_backup: bool = False) -> dict:
+    """Delete a note (and all its cards) by id.
+
+    Refuses to write if the collection drifted since the last MCP call.
+    """
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+    try:
+        pre_write_check(skip_backup=skip_backup, reason=f"delete_note:{note_id}")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
     fk.del_note(note_id)
+    remember_sync_state()
     return {"ok": True, "id": note_id}
 
 
 @mcp.tool()
-def add_media(path: str, fname: str | None = None) -> str:
-    """Copy a local file into the collection's media folder. Returns the stored filename."""
-    return fk.add_media(path=path, fname=fname)
+def add_media(path: str, fname: str | None = None, skip_backup: bool = False) -> str:
+    """Copy a local file into the collection's media folder. Returns the stored filename.
+
+    Refuses to write if the collection drifted since the last MCP call.
+    """
+    from fastanki.sync_guard import (  # type: ignore
+        pre_write_check,
+        remember_sync_state,
+        SyncStateDrift,
+    )
+    try:
+        pre_write_check(skip_backup=skip_backup, reason="add_media")
+    except SyncStateDrift as e:
+        raise RuntimeError(
+            f"refused write: {e}. Run check_sync_state to see the drift, "
+            f"reconcile, and re-run."
+        ) from e
+    out = fk.add_media(path=path, fname=fname)
+    remember_sync_state()
+    return out
 
 
 # ---------------------------------------------------------------------------

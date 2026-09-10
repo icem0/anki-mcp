@@ -497,6 +497,16 @@ def sync(self:Collection, user=None, passw=None, endpoint=None, upload=False):
     try: res = self.sync_collection(srv)
     except FullSyncRequired as e:
         local,remote = e.args
+        # safety net: snapshot the local DB before we hand it over to the
+        # server for a full download/upload, so a wrong choice is recoverable.
+        try:
+            from .sync_guard import create_backup
+            bp = create_backup(reason="pre-full-sync")
+            import sys as _sys
+            print(f"[sync_guard] FullSyncRequired — backup saved to {bp}", file=_sys.stderr, flush=True)
+        except Exception as _bg_err:
+            import sys as _sys
+            print(f"[sync_guard] backup failed: {_bg_err!r}", file=_sys.stderr, flush=True)
         if upload:
             if local['empty'] and not remote['empty']:
                 raise ValueError("Refusing to replace a non-empty server collection with an empty local one") from None
