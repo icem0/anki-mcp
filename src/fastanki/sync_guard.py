@@ -57,6 +57,7 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -103,11 +104,89 @@ def _backup_dir() -> Path:
 
 
 def _read_state_from_db() -> dict[str, Any]:
-    """Read col.scm, col.usn, col.mod, mtime, table counts, and max note id."""
+    """Read col.scm, col.usn, col.mod, mtime, table counts, and max note id.
+
+    Opens the DB in **immutable read-only** mode (``mode=ro&immutable=1``)
+    as the primary path. SQLite's ``immutable=1`` flag tells the driver
+    to skip the OS-level read-lock acquisition (and the SHM ``read-lock``
+    dance) entirely — the file is treated as a static snapshot. This is
+    the **only** way to reliably read the collection while ``anki-sync``
+    holds its long-lived writer connection (which is always, in
+    production). The risk is reading mid-write (one torn page), but
+    since this is read-only drift detection and a torn read raises
+    immediately, the fallback path (and caller retry) handles it.
+
+    Fallback: a locking-aware read that respects anki-sync's writer
+    lock. This is what the original test suite exercised; it works
+    when anki-sync is down (test mode).
+    """
     db = _db_path()
     if not db.exists():
         raise SyncGuardError(f"Collection DB not found: {db}")
-    con = sqlite3.connect(str(db))
+
+    # ---- Pass 1: immutable read (lock-free, always works alongside anki-sync) ----
+    try:
+        return _read_state_with_uri(f"file:{db}?mode=ro&immutable=1", timeout=5)
+    except sqlite3.OperationalError as e:
+        # Fall through to the locking-aware path.
+        immutable_err: Exception | None = e
+
+    # ---- Pass 2: locking-aware read (used by test suite; anki-sync must be down) ----
+    uri = f"file:{db}?mode=ro"
+    last_err: sqlite3.OperationalError | None = None
+    for attempt in range(10):
+        con = sqlite3.connect(uri, uri=True, timeout=10)
+        try:
+            row = con.execute("select id, scm, mod, usn from col").fetchone()
+            if not row:
+                raise SyncGuardError(f"Collection row missing in {db}")
+            cid, scm, mod, usn = row
+            notes = con.execute("select count(*) from notes").fetchone()[0]
+            cards = con.execute("select count(*) from cards").fetchone()[0]
+            revlog = con.execute("select count(*) from revlog").fetchone()[0]
+            max_note_id = con.execute("select max(id) from notes").fetchone()[0] or 0
+            try:
+                mtime = db.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            return {
+                "scm": int(scm),
+                "usn": int(usn),
+                "mod_ms": int(mod),
+                "mtime_iso": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+                "card_count": int(cards),
+                "note_count": int(notes),
+                "revlog_count": int(revlog),
+                "max_note_id": int(max_note_id),
+                "db_bytes": db.stat().st_size,
+            }
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if "locked" not in str(e).lower():
+                raise
+            con.close()
+            time.sleep(min(2 ** attempt * 0.05, 0.5))
+            continue
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+    raise SyncGuardError(
+        f"Collection DB remained locked after 10 retries: {last_err}. "
+        f"anki-sync is holding a long write transaction."
+    )
+
+
+def _read_state_with_uri(uri: str, timeout: int) -> dict[str, Any]:
+    """Read col.scm, col.usn, col.mod, mtime, table counts, and max note id
+    from the given sqlite3 URI. Helper for ``_read_state_from_db``.
+
+    Used both for the immutable (lock-free) pass and for callers that
+    want a lock-aware read.
+    """
+    db = _db_path()
+    con = sqlite3.connect(uri, uri=True, timeout=timeout)
     try:
         row = con.execute("select id, scm, mod, usn from col").fetchone()
         if not row:
@@ -133,7 +212,10 @@ def _read_state_from_db() -> dict[str, Any]:
             "db_bytes": db.stat().st_size,
         }
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
 
 
 # ---- core write ----------------------------------------------------------
