@@ -13,7 +13,7 @@ services:
       SYNC_BASE: "/sync"
       SYNC_HOST: "0.0.0.0"
       SYNC_PORT: "8080"
-      SYNC_BASE_URL: "https://anki-sync.sa-ma.online"
+      SYNC_BASE_URL: "${SYNC_BASE_URL:-https://anki-sync.example.com}"
     volumes:
       - anki-sync:/sync
     restart: unless-stopped
@@ -32,28 +32,39 @@ services:
     image: anki-mcp:local
     ports:
       - "8765:8765"
-    # ANKI_MCP_TOKEN is NOT set here. It is fetched at container start by the
-    # entrypoint (./mcp/entrypoint.sh) from the secret manager referenced via
-    # the INFISICAL_* variables below. Only the credentials needed to reach
-    # the secret manager live in .env.
+    # ANKI_MCP_TOKEN comes from the .env file (same env_file below). The
+    # entrypoint validates that it is set and refuses to start otherwise.
+    # The user is free to provision .env however they like — file,
+    # secret-manager sidecar, mounted secret, etc. No specific secret-manager
+    # CLI is baked into the image.
     env_file:
       - .env
     environment:
       ANKI_MCP_PORT: "8765"
       ANKI_MCP_HOST: "0.0.0.0"
-      INFISICAL_PROJECT_ID: "${INFISICAL_PROJECT_ID:?INFISICAL_PROJECT_ID must be set}"
-      INFISICAL_ENV: "${INFISICAL_ENV:-prod}"
-      INFISICAL_SECRET_PATH: "${INFISICAL_SECRET_PATH:-/anki-mcp}"
-      INFISICAL_SITE_URL: "${INFISICAL_SITE_URL:-https://infisical.sa-ma.online}"
-      # Point fastanki at matthias' collection, shared with anki-sync volume.
+      # Point fastanki at the shared collection, mounted from the anki-sync volume.
       # anki-sync MUST be stopped while mcp writes, then restarted.
-      FASTANKI_DIR: "/sync/${SYNC_USER1}"
+      # Note: SYNC_USER1=matthias:#<hash> encodes both username and password.
+      # Only the *username* part is the user directory; the #<hash> branch is
+      # only created by anki-sync on conflict (see sync_guard.py / check_sync_state).
+      # We resolve the username part to a dedicated env var (SYNC_USER1_NAME)
+      # because compose interpolation does not support ${VAR%%:*} substring
+      # expansion; bash inside the container would also have trouble because
+      # compose would already have consumed the ${...} before the shell sees it.
+      FASTANKI_DIR: "/sync/${SYNC_USER1_NAME}"
     volumes:
       - anki-mcp-data:/data
       # mount matthias' collection (read-write). Lock conflicts with anki-sync;
       # we stop anki-sync before mcp writes via Arcane redeploy orchestration.
       - anki-sync:/sync:rw
     restart: unless-stopped
+    # Order matters: mcp must come up *after* anki-sync is healthy, otherwise
+    # the FastAPI server on :8080 may not be listening yet and mcp's first
+    # FastAPI sync-handshake can race. We also pin the start order so a
+    # manual `docker compose up -d` boots them in the right sequence.
+    depends_on:
+      anki-sync:
+        condition: service_healthy
     healthcheck:
       # Auth is enforced: an unauthenticated request returns 401, which is
       # also a valid "server is up" signal. Any 1xx-4xx means the port is

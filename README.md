@@ -20,9 +20,9 @@ cd anki-mcp
 
 # 1. Configure secrets
 cp .env.example .env
-$EDITOR .env   # set SYNC_USER1 and the INFISICAL_* variables
-# Then put ANKI_MCP_TOKEN in your secret manager at
-# ${INFISICAL_PROJECT_ID} / ${INFISICAL_ENV} / ${INFISICAL_SECRET_PATH}
+$EDITOR .env   # set SYNC_USER1, SYNC_USER1_NAME and ANKI_MCP_TOKEN
+# ANKI_MCP_TOKEN can be any random string >= 32 chars. Generate with:
+#   openssl rand -hex 32
 
 # 2. Build and start
 docker compose up -d --build
@@ -32,9 +32,8 @@ docker compose up -d --build
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8765/mcp
 # → 401
 
-# 4. With the token (pulled live from the secret manager, never from a local file):
-TOKEN=$(infisical run --projectId "$INFISICAL_PROJECT_ID" --env "$INFISICAL_ENV" \
-         --path "$INFISICAL_SECRET_PATH" -- sh -c 'echo "$ANKI_MCP_TOKEN"')
+# 4. With the token from .env:
+TOKEN=$(grep ^ANKI_MCP_TOKEN .env | cut -d= -f2)
 curl -s -X POST http://localhost:8765/mcp \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -79,7 +78,7 @@ anki-mcp/
 
 ## Environment variables
 
-See [docs/env.md](docs/env.md) for the complete reference. Two values are secrets, the rest are hardcoded in `compose.yaml`.
+See [docs/env.md](docs/env.md) for the complete reference. Three values are secrets, all defined in `.env`.
 
 ## Architecture
 

@@ -12,7 +12,7 @@ Tools exposed:
 - add_media
 
 Transport: streamable-http, port from ANKI_MCP_PORT (default 8765).
-Auth: Bearer ANKI_MCP_TOKEN (set via Infisical).
+Auth: Bearer ANKI_MCP_TOKEN (set via compose env_file `.env`).
 
 Collection location: fastanki uses $FASTANKI_DIR/collection.anki2 (default ~/.fastanki).
 In the anki-sync stack, FASTANKI_DIR=/sync/matthias so the MCP operates on the same
@@ -31,7 +31,7 @@ from fastmcp import FastMCP        # type: ignore
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier  # type: ignore
 from fastanki import core as fk    # type: ignore
 
-# Auth: ANKI_MCP_TOKEN from env (set via compose env_file / Infisical).
+# Auth: ANKI_MCP_TOKEN from env (set via compose env_file `.env`).
 # If the var is missing, refuse to start — no anonymous access.
 _token = os.environ.get("ANKI_MCP_TOKEN", "").strip()
 if not _token:

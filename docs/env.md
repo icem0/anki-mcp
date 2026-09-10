@@ -1,9 +1,9 @@
 # Environment variables
 
 This document lists every environment variable used by the stack. The ones
-that hold secrets live in `.env` (and the MCP service's own bearer token lives
-in a secret manager, not here). Everything else is hardcoded in
-`compose.yaml` and not user-configurable.
+that hold secrets live in `.env` and are loaded by the `mcp` service's
+`env_file`. Everything else is hardcoded in `compose.yaml` and not
+user-configurable.
 
 Copy `.env.example` to `.env` and fill in the values.
 
@@ -15,39 +15,28 @@ Copy `.env.example` to `.env` and fill in the values.
 |---|---|
 | **Used by** | `anki-sync` service |
 | **Purpose** | Anki username whose collection is exposed by the sync server |
-| **Format** | Plain Anki account username (e.g. `matthias`) |
+| **Format** | `<username>:<password>` (or `<username>:<phc-hash>` if `PASSWORDS_HASHED=1`) |
 | **Where the value comes from** | Your Anki Desktop account — File → Switch Profile, or the username shown in the account dialog |
-| **Example** | `SYNC_USER1=matthias` |
+| **Example** | `SYNC_USER1=alice:s3cret` |
 
-### `INFISICAL_TOKEN`
-
-| | |
-|---|---|
-| **Used by** | `mcp` service (consumed by the container entrypoint) |
-| **Purpose** | Service-account token that lets the entrypoint fetch `ANKI_MCP_TOKEN` from the secret manager at startup |
-| **Format** | Service-account token issued by the secret manager |
-| **Where the value comes from** | The secret manager's service-accounts page. Should be a *read-only*, *path-scoped* token. Never use a personal / org-wide token for automation. |
-| **Example** | `INFISICAL_TOKEN=st.828ccb…` |
-
-### `INFISICAL_PROJECT_ID`, `INFISICAL_ENV`, `INFISICAL_SECRET_PATH`, `INFISICAL_SITE_URL`
+### `SYNC_USER1_NAME`
 
 | | |
 |---|---|
-| **Used by** | `mcp` service → entrypoint → `infisical run` |
-| **Purpose** | Locate `ANKI_MCP_TOKEN` inside the secret manager |
-| **Defaults** | `prod`, `/anki-mcp`, `https://infisical.sa-ma.online` (override only if your secret manager runs elsewhere) |
-
-## Secret-manager-resident secrets (NOT in `.env`)
+| **Used by** | `mcp` service → sets `FASTANKI_DIR` |
+| **Purpose** | Username part of `SYNC_USER1`, needed separately because compose interpolation does not support `${VAR%%:*}` substring expansion |
+| **Format** | Same as the username portion of `SYNC_USER1` |
+| **Example** | `SYNC_USER1_NAME=alice` |
 
 ### `ANKI_MCP_TOKEN`
 
 | | |
 |---|---|
-| **Used by** | `mcp` service (consumed by FastMCP at startup) |
-| **Purpose** | Bearer token MCP clients must send on every request (`Authorization: Bearer *** |
+| **Used by** | `mcp` service (consumed by FastMCP at startup, validated by the entrypoint) |
+| **Purpose** | Bearer token MCP clients must send on every request (`Authorization: Bearer <ANKI_MCP_TOKEN>`) |
 | **Format** | Any random string ≥ 32 chars, alphanumeric |
-| **Where it lives** | The secret manager, in the workspace/environment/path configured by the `INFISICAL_*` variables. Fetched at container start by the entrypoint and injected into the process env. Never written to disk. |
-| **How to rotate** | Update the value in the secret manager. Restart the container (`docker compose restart mcp`). The new value takes effect on the next start. |
+| **Where the value comes from** | Generate it yourself — e.g. `openssl rand -hex 32`. Treat it like a password. |
+| **Example** | `ANKI_MCP_TOKEN=9f3a1c8b2e5d7f0a4c6b8d0e2f4a6c8e...` |
 
 Use the same value in your MCP client config:
 
@@ -73,8 +62,8 @@ Use the same value in your MCP client config:
 - **Purpose:** Port the FastMCP HTTP server listens on (the host-side port is mapped 1:1).
 
 ### `FASTANKI_DIR`
-- **Value:** `/sync/${SYNC_USER1}`
-- **Purpose:** Override for fastanki's collection path. fastanki defaults to `~/Library/Application Support/Anki2/<profile>` on macOS or `~/.local/share/Anki2/<profile>` on Linux. Setting `FASTANKI_DIR=/sync/matthias` tells fastanki to read and write `/sync/matthias/collection.anki2` — the same file the `anki-sync` container exposes.
+- **Value:** `/sync/${SYNC_USER1_NAME}`
+- **Purpose:** Override for fastanki's collection path. fastanki defaults to `~/Library/Application Support/Anki2/<profile>` on macOS or `~/.local/share/Anki2/<profile>` on Linux. Setting `FASTANKI_DIR=/sync/<username>` tells fastanki to read and write `/sync/<username>/collection.anki2` — the same file the `anki-sync` container exposes.
 - **Why it matters:** This is the mechanism that lets MCP tools and the Anki sync server share one collection. Without it, MCP would create a fresh empty collection on every start.
 
 ## Volumes
@@ -86,12 +75,12 @@ Use the same value in your MCP client config:
 | `anki-sync` | `/sync` | both services | holds `<profile>/collection.anki2` + media |
 | `anki-mcp-data` | `/data` | `mcp` | reserved (not currently used; declared for future local-cache needs) |
 
-The `<profile>` directory inside the volume is fixed by the username in `SYNC_USER1`. With `SYNC_USER1=matthias` the collection lives at `/sync/matthias/collection.anki2` inside both containers, which is why `FASTANKI_DIR` is set to `/sync/matthias`.
+The `<profile>` directory inside the volume is fixed by the username in `SYNC_USER1`. With `SYNC_USER1=alice:...` the collection lives at `/sync/alice/collection.anki2` inside both containers, which is why `FASTANKI_DIR` is set to `/sync/alice`.
 
 To inspect the volume from the host:
 
 ```bash
-docker compose exec anki-sync ls /sync/matthias
+docker compose exec anki-sync ls /sync/<username>
 # collection.anki2  collection.anki2-shm  collection.anki2-wal  media
 ```
 
